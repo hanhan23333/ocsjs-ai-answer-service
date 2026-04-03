@@ -1,6 +1,6 @@
 # EduBrain AI - 智能题库系统
 
-这是一个基于Python和OpenAI API的新一代智能题库服务，专为[OCS (Online Course Script)](https://github.com/ocsjs/ocsjs)设计，可以通过AI自动回答题目。此服务实现了与OCS AnswererWrapper兼容的API接口，方便用户将AI能力整合到OCS题库搜索中。
+这是一个基于Python的智能题库服务，支持 OpenAI 兼容接口、Deepseek Api 和 Gemini API，专为[OCS (Online Course Script)](https://github.com/ocsjs/ocsjs)设计，可以通过AI自动回答题目。此服务实现了与OCS AnswererWrapper兼容的API接口，方便用户将AI能力整合到OCS题库搜索中。
 
 ## ⚠️ 重要提示
 
@@ -13,7 +13,7 @@
 
 ## 功能特点
 
-- 💡 **AI驱动**：使用OpenAI API生成智能回答
+- 💡 **AI驱动**：支持 OpenAI / Gemini 双 provider 生成智能回答（Deepseek的话默认Chatgpt provider不更改，直接更改）
 - 🔄 **OCS兼容**：完全兼容OCS的AnswererWrapper题库接口
 - 🚀 **高性能**：内存缓存优化，快速响应请求
 - 🔒 **安全可靠**：支持访问令牌验证，保护API调用
@@ -25,7 +25,7 @@
 ## 系统要求
 
 - Python 3.7+
-- OpenAI API密钥（需要单独申请）
+- OpenAI API 密钥或 Gemini API 密钥（二选一，取决于启用的 provider）
 
 ## 快速开始
 
@@ -50,10 +50,28 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-编辑`.env`文件，至少需要填写OpenAI API密钥：
+编辑`.env`文件，至少需要填写当前 provider 对应的密钥：
 
 ```
+AI_PROVIDER=openai
 OPENAI_API_KEY=your_api_key_here
+OPENAI_API_BASE=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+```
+如果要启用 Deepseek：
+
+```
+AI_PROVIDER=openai
+OPENAI_API_KEY=your_api_key_here
+OPENAI_API_BASE=https://api.deepseek.com/
+OPENAI_MODEL=deepseek-chat
+```
+如果要启用 Gemini：
+
+```
+AI_PROVIDER=gemini
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-3-flash-preview
 ```
 
 ### 4. 启动服务
@@ -135,6 +153,7 @@ python app.py
   "message": "AI题库服务运行正常",
   "version": "1.0.0",
   "cache_enabled": true,
+  "provider": "openai",
   "model": "gpt-3.5-turbo"
 }
 ```
@@ -166,6 +185,7 @@ python app.py
 {
   "version": "1.0.0",
   "uptime": 1621234567.89,
+  "provider": "openai",
   "model": "gpt-3.5-turbo",
   "cache_enabled": true,
   "cache_size": 123

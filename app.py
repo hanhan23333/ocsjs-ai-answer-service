@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 EduBrain AI - 智能题库系统
-基于 OpenAI API 的智能题库服务，提供兼容 OCS 接口的智能答题功能
+基于 OpenAI / Gemini API 的智能题库服务，提供兼容 OCS 接口的智能答题功能
 作者：Lynn
 版本：1.1.0
 """
 from flask import Flask, request, jsonify, make_response, render_template
 from flask_cors import CORS
-import os
 import time
 import logging
 import openai
-import json
 from datetime import datetime
 
 from config import Config
@@ -24,6 +22,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger('ai_answer_service')
 
+SYSTEM_PROMPT = (
+    "你是一个专业的考试答题助手。请直接回答答案，不要解释。"
+    "选择题只回答选项的内容(如：地球)；"
+    "多选题用#号分隔答案,只回答选项的内容(如中国#世界#地球)；"
+    "判断题只回答: 正确/对/true/√ 或 错误/错/false/×；"
+    "填空题直接给出答案。"
+)
+SUPPORTED_AI_PROVIDERS = {"openai", "gemini"}
+
 # 初始化应用
 app = Flask(__name__)
 CORS(app)  # 启用CORS支持
@@ -31,21 +38,136 @@ CORS(app)  # 启用CORS支持
 # 初始化缓存
 cache = SimpleCache(Config.CACHE_EXPIRATION) if Config.ENABLE_CACHE else None
 
-# 验证OpenAI API密钥
-if not Config.OPENAI_API_KEY:
-    logger.critical("未设置OpenAI API密钥，请在.env文件中配置OPENAI_API_KEY")
-    raise ValueError("请设置环境变量OPENAI_API_KEY")
-
-# 初始化OpenAI客户端
-client = openai.OpenAI(
-    api_key=Config.OPENAI_API_KEY,
-    base_url=Config.OPENAI_API_BASE
-)
-
 # 问答记录存储（实际应用中可以使用数据库）
 qa_records = []
 MAX_RECORDS = 100  # 最多保存100条记录
 start_time = time.time()
+
+
+def validate_provider_config():
+    """验证当前启用的 AI provider 配置是否完整"""
+    if Config.AI_PROVIDER not in SUPPORTED_AI_PROVIDERS:
+        logger.critical("不支持的AI_PROVIDER配置: %s", Config.AI_PROVIDER)
+        raise ValueError("AI_PROVIDER 仅支持 openai 或 gemini")
+
+    if Config.AI_PROVIDER == "openai" and not Config.OPENAI_API_KEY:
+        logger.critical("未设置OpenAI API密钥，请在.env文件中配置OPENAI_API_KEY")
+        raise ValueError("请设置环境变量OPENAI_API_KEY")
+
+    if Config.AI_PROVIDER == "gemini" and not Config.GEMINI_API_KEY:
+        logger.critical("未设置Gemini API密钥，请在.env文件中配置GEMINI_API_KEY")
+        raise ValueError("请设置环境变量GEMINI_API_KEY")
+
+
+def initialize_ai_client():
+    """根据配置初始化当前启用的 AI 客户端"""
+    if Config.AI_PROVIDER == "openai":
+        return openai.OpenAI(
+            api_key=Config.OPENAI_API_KEY,
+            base_url=Config.OPENAI_API_BASE
+        )
+
+    try:
+        from google import genai
+    except ImportError as exc:
+        logger.critical("Gemini provider 已启用，但未安装 google-genai 依赖")
+        raise ImportError("Gemini provider 需要安装 google-genai 依赖") from exc
+
+    return genai.Client(api_key=Config.GEMINI_API_KEY)
+
+
+def build_messages(prompt):
+    """统一构建上下文结构，保证不同 provider 使用相同的角色设定"""
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": prompt}
+    ]
+
+
+def build_gemini_payload(messages):
+    """将 OpenAI 风格消息结构转换为 Gemini 所需格式"""
+    from google.genai import types
+
+    system_instructions = []
+    contents = []
+
+    for message in messages:
+        content = message.get("content", "")
+        if not content:
+            continue
+
+        role = message.get("role", "user")
+        if role == "system":
+            system_instructions.append(content)
+            continue
+
+        gemini_role = "model" if role == "assistant" else "user"
+        contents.append(
+            types.Content(
+                role=gemini_role,
+                parts=[types.Part(text=content)]
+            )
+        )
+
+    config_kwargs = {
+        "temperature": Config.TEMPERATURE,
+        "max_output_tokens": Config.MAX_TOKENS
+    }
+    if system_instructions:
+        config_kwargs["system_instruction"] = "\n\n".join(system_instructions)
+
+    return contents, types.GenerateContentConfig(**config_kwargs)
+
+
+def extract_gemini_response_text(response):
+    """兼容 Gemini SDK 的不同响应形态，稳定提取文本"""
+    response_text = getattr(response, "text", None)
+    if response_text:
+        return response_text.strip()
+
+    candidates = getattr(response, "candidates", None) or []
+    parts_text = []
+    for candidate in candidates:
+        content = getattr(candidate, "content", None)
+        parts = getattr(content, "parts", []) if content else []
+        for part in parts:
+            part_text = getattr(part, "text", None)
+            if part_text:
+                parts_text.append(part_text)
+
+    return "\n".join(parts_text).strip()
+
+
+def generate_ai_response(messages):
+    """根据当前 provider 生成答案"""
+    if Config.AI_PROVIDER == "openai":
+        response = client.chat.completions.create(
+            model=Config.OPENAI_MODEL,
+            temperature=Config.TEMPERATURE,
+            max_tokens=Config.MAX_TOKENS,
+            messages=messages
+        )
+        return response.choices[0].message.content.strip()
+
+    contents, config = build_gemini_payload(messages)
+    response = client.models.generate_content(
+        model=Config.GEMINI_MODEL,
+        contents=contents,
+        config=config
+    )
+    response_text = extract_gemini_response_text(response)
+    if not response_text:
+        raise ValueError("Gemini 未返回有效文本内容")
+    return response_text
+
+
+validate_provider_config()
+client = initialize_ai_client()
+logger.info(
+    "AI provider 初始化完成: provider=%s, model=%s",
+    Config.AI_PROVIDER,
+    Config.get_active_model()
+)
 
 def verify_access_token(request):
     """验证访问令牌（如果配置了的话）"""
@@ -121,19 +243,8 @@ def search():
         # 构建发送给OpenAI的提示
         prompt = parse_question_and_options(question, options, question_type)
         
-        # 调用OpenAI API
-        response = client.chat.completions.create(
-            model=Config.OPENAI_MODEL,
-            temperature=Config.TEMPERATURE,
-            max_tokens=Config.MAX_TOKENS,
-            messages=[
-                {"role": "system", "content": "你是一个专业的考试答题助手。请直接回答答案，不要解释。选择题只回答选项的内容(如：地球)；多选题用#号分隔答案,只回答选项的内容(如中国#世界#地球)；判断题只回答: 正确/对/true/√ 或 错误/错/false/×；填空题直接给出答案。"},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        
-        # 获取AI生成的答案
-        ai_answer = response.choices[0].message.content.strip()
+        messages = build_messages(prompt)
+        ai_answer = generate_ai_response(messages)
         
         # 处理答案格式
         processed_answer = extract_answer(ai_answer, question_type)
@@ -180,7 +291,8 @@ def health_check():
         'message': 'AI题库服务运行正常',
         'version': '1.0.0',
         'cache_enabled': Config.ENABLE_CACHE,
-        'model': Config.OPENAI_MODEL
+        'provider': Config.AI_PROVIDER,
+        'model': Config.get_active_model()
     })
 
 @app.route('/api/cache/clear', methods=['POST'])
@@ -218,7 +330,8 @@ def get_stats():
     stats = {
         'version': '1.0.0',
         'uptime': time.time() - start_time,
-        'model': Config.OPENAI_MODEL,
+        'provider': Config.AI_PROVIDER,
+        'model': Config.get_active_model(),
         'cache_enabled': Config.ENABLE_CACHE,
         'cache_size': len(cache.cache) if Config.ENABLE_CACHE else 0,
         'qa_records_count': len(qa_records)
@@ -240,7 +353,8 @@ def dashboard():
         version="1.1.0",
         cache_enabled=Config.ENABLE_CACHE,
         cache_size=len(cache.cache) if Config.ENABLE_CACHE else 0,
-        model=Config.OPENAI_MODEL,
+        provider=Config.AI_PROVIDER,
+        model=Config.get_active_model(),
         uptime=uptime_str,
         records=qa_records
     )
